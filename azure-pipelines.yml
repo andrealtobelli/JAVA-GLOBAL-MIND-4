@@ -1,39 +1,97 @@
+# ==========================================
+# 🚀 Pipeline CI + CD - Projeto MindTrack (Java)
+# ==========================================
+# Este pipeline:
+#  1️⃣ Executa build, testes e publica artefatos (CI)
+#  2️⃣ Faz deploy automático no Azure App Service (CD)
+# ==========================================
+
 trigger:
   branches:
     include:
-      - main
-      - master
+      - main   # Build é acionado apenas após merge via PR
 
 pool:
   vmImage: 'ubuntu-latest'
 
 variables:
-  mavenVersion: '3.9.0'
+  mavenPomFile: 'nexus/pom.xml'
+  buildConfiguration: 'Release'
+  artifactName: 'mindtrack-drop'
+  webAppName: 'mindtrack-nexus-app'             # Nome do Web App no Azure
+  azureSubscription: 'nexus-azure-conn'         # Service connection configurada no Azure DevOps
+  packagePath: '$(Build.ArtifactStagingDirectory)/publish_output'
 
-steps:
-  - task: Maven@3
-    inputs:
-      mavenPomFile: 'nexus/pom.xml'
-      goals: 'clean package'
-      options: '-DskipTests'
-      publishJUnitResults: false
+# ================================
+# 🧱 STAGE 1: Build, Test & Publish
+# ================================
+stages:
+  - stage: Build
+    displayName: 'Build, Testes e Publicação do MindTrack'
+    jobs:
+      - job: BuildJob
+        displayName: 'Compilar, testar e publicar o projeto Java'
+        steps:
+          - checkout: self
 
-  - task: Docker@2
-    inputs:
-      containerRegistry: 'DockerHub'
-      repository: 'nexus-mindtrack'
-      command: 'buildAndPush'
-      Dockerfile: 'nexus/Dockerfile'
-      tags: |
-        $(Build.BuildId)
-        latest
+          - task: Maven@3
+            displayName: 'Compilar e testar o projeto com Maven'
+            inputs:
+              mavenPomFile: '$(mavenPomFile)'
+              goals: 'clean package'
+              options: '-Dmaven.test.failure.ignore=false'
+              publishJUnitResults: true
+              testResultsFiles: '**/target/surefire-reports/TEST-*.xml'
+              javaHomeOption: 'JDKVersion'
+              jdkVersionOption: '1.17'
+              mavenVersionOption: 'Default'
+              mavenAuthenticateFeed: false
 
-  - task: AzureWebApp@1
-    inputs:
-      azureSubscription: 'Azure-Subscription'
-      appName: 'nexus-mindtrack'
-      package: '$(Pipeline.Workspace)/**/*.jar'
-      deploymentMethod: 'auto'
+          - script: |
+              echo "📦 Movendo artefato gerado..."
+              mkdir -p $(packagePath)
+              cp nexus/target/*.jar $(packagePath)
+            displayName: 'Preparar artefato para publicação'
 
+          - task: ArchiveFiles@2
+            displayName: 'Compactar artefatos em .zip'
+            inputs:
+              rootFolderOrFile: '$(packagePath)'
+              includeRootFolder: false
+              archiveType: 'zip'
+              archiveFile: '$(Build.ArtifactStagingDirectory)/$(artifactName).zip'
+              replaceExistingArchive: true
 
+          - task: PublishBuildArtifacts@1
+            displayName: 'Publicar artefato para o pipeline'
+            inputs:
+              pathToPublish: '$(Build.ArtifactStagingDirectory)'
+              artifactName: '$(artifactName)'
 
+# ================================
+# 🚀 STAGE 2: Deploy no Azure App Service
+# ================================
+  - stage: Deploy
+    displayName: 'Deploy automático no Azure App Service (MindTrack)'
+    dependsOn: Build
+    condition: succeeded()
+
+    jobs:
+      - deployment: DeployJob
+        displayName: 'Publicar MindTrack no App Service Nexus'
+        environment: 'production'
+        strategy:
+          runOnce:
+            deploy:
+              steps:
+                - task: AzureWebApp@1
+                  displayName: 'Deploy no App Service (MindTrack)'
+                  inputs:
+                    azureSubscription: '$(azureSubscription)'
+                    appName: '$(webAppName)'
+                    package: '$(Pipeline.Workspace)/mindtrack-drop/mindtrack-drop.zip'
+                    deploymentMethod: 'auto'
+
+                - script: |
+                    echo "✅ Deploy concluído com sucesso no App Service: $(webAppName)"
+                  displayName: 'Confirmação do deploy'
